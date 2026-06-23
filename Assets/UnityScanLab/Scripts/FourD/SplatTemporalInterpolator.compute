@@ -1,0 +1,135 @@
+// Temporal Interpolation Compute Shader for 4DGS
+// Interpolates between two frames of uncompressed Gaussian splat data
+// and writes the result into Aras-p's packed formats.
+
+#pragma kernel CSInterpolateSplats
+
+// Note: All packing utilities (EncodeQuatToNorm10, PackRotation, SplatIndexToPixelIndex)
+// are defined inline below — no external package include required.
+
+// Our uncompressed input buffers
+StructuredBuffer<float3> _PosA;
+StructuredBuffer<float3> _PosB;
+
+StructuredBuffer<float4> _RotA;
+StructuredBuffer<float4> _RotB;
+
+StructuredBuffer<float3> _ScaleA;
+StructuredBuffer<float3> _ScaleB;
+
+StructuredBuffer<float4> _ColorA;
+StructuredBuffer<float4> _ColorB;
+
+StructuredBuffer<float> _OpacityA;
+StructuredBuffer<float> _OpacityB;
+
+// Target buffers in Aras-p's format
+RWByteAddressBuffer _DstPos;
+RWByteAddressBuffer _DstOther;
+RWTexture2D<float4> _DstColor; // Optional: Only if we use RenderTexture for Color
+
+float _InterpolationFactor;
+uint _SplatCount;
+
+// Function from SplatUtilities.compute to pack rotation
+uint EncodeQuatToNorm10(float3 v)
+{
+    uint3 vi = (uint3)clamp((v * 0.5 + 0.5) * 1023.0 + 0.5, 0.0, 1023.0);
+    return vi.x | (vi.y << 10) | (vi.z << 20);
+}
+
+float3 PackSmallest3Rotation(float4 q)
+{
+    // Find biggest component
+    float3 absQ = abs(q.xyz);
+    float maxQ = max(max(absQ.x, absQ.y), max(absQ.z, abs(q.w)));
+    
+    float3 res;
+    uint idx = 0;
+    if (maxQ == absQ.x) { res = q.yzw; idx = 0; }
+    else if (maxQ == absQ.y) { res = q.xzw; idx = 1; }
+    else if (maxQ == absQ.z) { res = q.xyw; idx = 2; }
+    else { res = q.xyz; idx = 3; }
+    
+    if (q[idx] < 0.0) res = -res;
+    
+    // Scale to -1/sqrt(2) .. 1/sqrt(2) to -1 .. 1
+    res *= 1.41421356;
+    
+    // Encode idx in lowest 2 bits?
+    // Wait, Aras-p's EncodeQuatToNorm10 takes float3. The 2 bits are handled by taking the encoded value and adding the index.
+    return res;
+}
+
+uint PackRotation(float4 q)
+{
+    float3 absQ = abs(q.xyz);
+    float maxQ = max(max(absQ.x, absQ.y), max(absQ.z, abs(q.w)));
+    
+    float3 res;
+    uint idx = 0;
+    if (maxQ == absQ.x) { res = q.yzw; idx = 0; }
+    else if (maxQ == absQ.y) { res = q.xzw; idx = 1; }
+    else if (maxQ == absQ.z) { res = q.xyw; idx = 2; }
+    else { res = q.xyz; idx = 3; }
+    
+    if (q[idx] < 0.0) res = -res;
+    res *= 1.41421356;
+    
+    uint val = EncodeQuatToNorm10(res);
+    return val | (idx << 30);
+}
+
+uint DecodeMorton2D_16x16(uint t, bool y)
+{
+    t = (t & 0xFF) | ((t & 0xFE) << 7);
+    t &= 0x5555;
+    t = (t ^ (t >> 1)) & 0x3333;
+    t = (t ^ (t >> 2)) & 0x0f0f;
+    return y ? (t >> 8) : (t & 0xF);
+}
+
+// Matches GaussianSplatting.hlsl SplatIndexToPixelIndex.
+uint3 SplatIndexToPixelIndex(uint idx)
+{
+    uint width = 2048 / 16;
+    uint x = DecodeMorton2D_16x16(idx, false);
+    uint y = DecodeMorton2D_16x16(idx, true);
+    idx >>= 8;
+    return uint3((idx % width) * 16 + x, (idx / width) * 16 + y, 0);
+}
+
+[numthreads(1024, 1, 1)]
+void CSInterpolateSplats(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    float t = _InterpolationFactor;
+
+    // Position (VectorFormat.Float32 = 12 bytes)
+    float3 p = lerp(_PosA[idx], _PosB[idx], t);
+    _DstPos.Store3(idx * 12, asuint(p));
+
+    // Other (Rotation 4 bytes + Scale Float32 12 bytes = 16 bytes)
+    float4 qA = _RotA[idx];
+    float4 qB = _RotB[idx];
+    
+    // Quaternion Nlerp or Slerp. For small steps, Nlerp is fast and fine.
+    float dotQ = dot(qA, qB);
+    if (dotQ < 0.0)
+        qB = -qB;
+    float4 q = normalize(lerp(qA, qB, t));
+    uint packedRot = PackRotation(q);
+
+    float3 s = lerp(_ScaleA[idx], _ScaleB[idx], t);
+    
+    uint otherStride = 16;
+    _DstOther.Store4(idx * otherStride, uint4(packedRot, asuint(s.x), asuint(s.y), asuint(s.z)));
+
+    float4 c = lerp(_ColorA[idx], _ColorB[idx], t);
+    float op = lerp(_OpacityA[idx], _OpacityB[idx], t);
+    uint3 pixelIdx = SplatIndexToPixelIndex(idx);
+    _DstColor[pixelIdx.xy] = float4(c.rgb, op);
+}
