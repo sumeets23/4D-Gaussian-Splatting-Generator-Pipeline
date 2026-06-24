@@ -1,9 +1,11 @@
 # 4D Gaussian Splatting Generator Pipeline
 
+<img width="3837" height="1682" alt="Screenshot 2026-06-23 111201" src="https://github.com/user-attachments/assets/26f3be8b-9b71-4b23-96bd-5c207147df88" />
+
 
 This repository is a demo-only version of the 4D Gaussian Splatting Generator Pipeline project. It contains the generated 4D Gaussian output, the Unity runtime playback scripts, and the renderer-side assets needed to preview the sequence in Unity.
 
-It does not include the reconstruction generator pipeline, Python backend, editor tooling, training dependencies, or dataset processing stack.
+It does not include the reconstruction generator pipeline, Python backend, editor tooling, splat erasing tool, training dependencies, or dataset processing stack.
 
 ## What This Demo Shows
 
